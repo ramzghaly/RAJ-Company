@@ -1,0 +1,58 @@
+rules_version = '2';
+// RAJ Co. — Firestore security rules
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signed()   { return request.auth != null; }
+    function membersPath() { return /databases/$(database)/documents/meta/members; }
+    function hasMembers() { return exists(membersPath()); }
+    function mem()      { return get(membersPath()).data; }
+    function isOwner()  { return signed() && hasMembers() && mem().owner == request.auth.uid; }
+    function myName()   { return request.auth.token.email.split('@')[0].split('[+]')[0]; }
+    function staffRec() { return mem().users.get(myName(), null); }
+    function staff()    { return signed() && hasMembers() && request.auth.token.email != null
+                                 && staffRec() != null && staffRec().uid == request.auth.uid && staffRec().active == true; }
+    function member()   { return isOwner() || staff(); }
+    function admin()    { return isOwner() || (staff() && staffRec().role == 'ADMIN'); }
+    function writer()   { return isOwner() || (staff() && staffRec().role != 'VIEWER'); }
+
+    // readable before login: "is the system set up?" and username -> login e-mail
+    match /meta/public { allow read: if true; allow create: if isOwner(); allow update, delete: if isOwner(); }
+    match /meta/logins { allow read: if true; allow write: if isOwner(); }
+    match /meta/members {
+      allow read: if member();
+      allow create: if signed() && !hasMembers()
+                    && request.auth.token.email == 'ramz.ghaly@gmail.com'
+                    && request.resource.data.owner == request.auth.uid;
+      allow update: if isOwner() && request.resource.data.owner == resource.data.owner;
+      allow delete: if false;
+    }
+
+    // settings (users list, encryption info, period lock): everyone logged in reads, OWNER / ADMIN change
+    match /settings/{doc} { allow read: if member(); allow write: if admin(); }
+
+    // each user's own wrapped key (encrypted with their password) — only they can read it
+    match /creds/{uid} {
+      allow read, write: if member() && request.auth.uid == uid;
+      match /{rest=**} { allow read, write: if member() && request.auth.uid == uid; }
+    }
+    match /activations/{u} { allow read, write: if member(); }
+
+    // audit trail: each person writes only their own log, nobody edits or deletes a line
+    match /audit/{uid} {
+      allow read: if admin() || (member() && request.auth.uid == uid);
+      allow create, update: if member() && request.auth.uid == uid;
+      match /log/{line} {
+        allow read: if admin() || (member() && request.auth.uid == uid);
+        allow create: if member() && request.auth.uid == uid;
+        allow update, delete: if false;
+      }
+    }
+
+    // business data (every record is encrypted by the app)
+    match /{coll}/{doc} {
+      allow read: if member() && coll in ['entries','expenseTypes','products','bankDirections','fundDirections','stockMoves','menuItems','recipes','stockCounts','loanCodes','payrolls','cashCounts','bankRecs'];
+      allow write: if writer() && coll in ['entries','expenseTypes','products','bankDirections','fundDirections','stockMoves','menuItems','recipes','stockCounts','loanCodes','payrolls','cashCounts','bankRecs'];
+    }
+  }
+}
