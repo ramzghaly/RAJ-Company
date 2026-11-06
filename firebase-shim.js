@@ -10,9 +10,28 @@
   const CFG = window.RAJCO_FIREBASE || {};
   const app = firebase.initializeApp(CFG.config);
   const auth = firebase.auth();
-  const fs = firebase.firestore();
-  try { fs.settings({ ignoreUndefinedProperties: true, merge: true }); } catch (e) {}
-  try { fs.enablePersistence({ synchronizeTabs: true }).catch(() => {}); } catch (e) {}
+  // The Firestore database of a new project can be called "(default)" or "default" — find which one exists.
+  let fs = null;
+  const fsReady = (async () => {
+    let id = '(default)';
+    for (const cand of ['(default)', 'default']) {
+      try {
+        const r = await fetch('https://firestore.googleapis.com/v1/projects/' + CFG.config.projectId + '/databases/' + encodeURIComponent(cand) + '/documents/meta/public?key=' + CFG.config.apiKey);
+        const t = await r.text();
+        if (!(r.status === 404 && /does not exist for project/.test(t))) { id = cand; break; }
+      } catch (e) {}
+    }
+    if (id === '(default)') {
+      fs = firebase.firestore();
+      try { fs.settings({ ignoreUndefinedProperties: true, merge: true }); } catch (e) {}
+      try { fs.enablePersistence({ synchronizeTabs: true }).catch(() => {}); } catch (e) {}
+    } else {
+      const del = app.container.getProvider('firestore').getImmediate({ identifier: id });
+      fs = new firebase.firestore.Firestore(app, del);
+      try { fs.settings({ ignoreUndefinedProperties: true, merge: true }); } catch (e) {}
+    }
+    window.__fbDb = id;
+  })();
   const DOMAIN = (CFG.STAFF_DOMAIN || 'rajco.app').toLowerCase();
   const OWNER_EMAIL = String(CFG.OWNER_EMAIL || '').trim().toLowerCase();
 
@@ -23,7 +42,7 @@
   let unsubMembers = null;
 
   let logins = null; // public map username -> login email (staff accounts are re-created on «كود دخول جديد»)
-  async function loadLogins() { try { const d = await fs.doc('meta/logins').get(); logins = d.exists ? d.data() : {}; } catch (e) { logins = logins || {}; } return logins; }
+  async function loadLogins() { await fsReady; try { const d = await fs.doc('meta/logins').get(); logins = d.exists ? d.data() : {}; } catch (e) { logins = logins || {}; } return logins; }
   const emailOf = name => (name === 'owner' ? OWNER_EMAIL : ((logins && logins[name]) || (name + '@' + DOMAIN)));
   const err = (code, message) => Object.assign(new Error(message || code), { code });
 
@@ -32,13 +51,13 @@
     unsubMembers = fs.doc('meta/members').onSnapshot(s => { members = s.exists ? s.data() : null; }, () => {});
   }
   async function loadMembers() {
-    const s = await fs.doc('meta/members').get();
+    await fsReady; const s = await fs.doc('meta/members').get();
     members = s.exists ? s.data() : null; return members;
   }
 
   // ---------- login ----------
   async function needsSetup() {
-    try { const s = await fs.doc('meta/public').get(); return !s.exists; }
+    await fsReady; try { const s = await fs.doc('meta/public').get(); return !s.exists; }
     catch (e) { console.warn('meta/public', e); return false; }
   }
   function mapAuthError(e) {
@@ -195,7 +214,7 @@
   const after = v => ready.then(() => v);
   window.claude = Object.freeze({
     use(name) {
-      if (name === 'db') return after(fs);
+      if (name === 'db') return ready.then(() => fsReady).then(() => fs);
       if (name === 'user') return after(userApi);
       if (name === 'assets') return after(assetsApi);
       if (name === 'downloads') return Promise.resolve(downloadsApi);
